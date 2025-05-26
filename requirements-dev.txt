@@ -1,0 +1,13 @@
+# I want to separate testing and development dependencies from the main application dependencies to keep the main application lightweight.
+-r requirements.txt
+
+# Testing dependencies
+requests
+pytest
+pytest-asyncio
+httpx
+
+# Linting and formatting tools
+black
+isort
+flake8

@@ -1,0 +1,185 @@
+name: Fruit API CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    # We can use local docker-compose.yaml for test
+    # Run db with docker run command
+    # Or github "services" for running DB
+    services:
+      db:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fruituser
+          POSTGRES_PASSWORD: fruitpass
+          POSTGRES_DB: fruitdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U fruituser -d fruitdb"
+          --health-interval=1s
+          --health-timeout=1s
+          --health-retries=5
+        # Using GitHub Actions services to provide a Postgres DB for integration tests.
+        # Healthcheck ensures the DB is ready before tests run.
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      # Checks out the repository code so it can be used in the workflow.
+
+    # Building the test image in that case faster then installing python on runner
+    # We could stick to source code checks without docker, and install python and pip in parallel with integration tests if needed
+    #
+    # Building a Docker image for tests ensures a consistent environment and it is faster than installing dependencies on the runner.
+
+    # ---------- Build test image ----------
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      # Enables advanced Docker build capabilities, such as multi-platform builds and cache management.
+
+    - name: Get network name from service
+      id: db_network
+      env:
+        POSTGRES_IMAGE: postgres:16-alpine
+      run: |
+        postgres_container=$(docker ps -q --filter ancestor=$POSTGRES_IMAGE --filter status=running)
+        postgres_network_id=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}' "$postgres_container")
+        postgres_network=$(docker network inspect "$postgres_network_id" --format '{{.Name}}')
+        echo $postgres_network
+        echo "postgres_network=$postgres_network" >> $GITHUB_ENV
+      # Finds the Docker network used by the Postgres service so containers can communicate.
+      # This is necessary because GitHub Actions creates a unique network for service containers.
+
+    - name: Build test image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: Dockerfile
+        target: test
+        load: true
+        tags: fruitapi:test
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+      # Builds the Docker image for running tests, using the 'test' target in the Dockerfile.
+      # 'load: true' loads the image into the local Docker cache for use in later steps.
+
+    - name: Build prod image # It will be very fast as we are reusing layers from the test image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: Dockerfile
+        target: prod
+        load: true
+        tags: fruitapi:latest
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+      # Builds the production Docker image, reusing layers from the test image for speed.
+
+    # ---------- Run lint & unit ----------
+    - name: Run linters
+      run: |
+        docker run --rm fruitapi:test sh -c "
+          black --check app tests &&
+          isort --check-only app tests &&
+          flake8 app tests
+        "
+      # Runs code linters inside the test Docker image to ensure code style and quality.
+
+    - name: Run unit tests
+      run: |
+        docker run --rm fruitapi:test pytest -v -s tests/test_unit.py
+      # Runs unit tests inside the test Docker image for isolation and consistency.
+
+
+    # We can add more tests here, like security tests, performance tests, etc.
+
+    # ---------- Stop API container ----------
+    # We need to stop API container to avoid conflicts with next build when using ACT locally
+    - name: Stop API container
+      if: env.ACT == 'true'
+      run: |
+        docker stop api || true
+      # Stops the API container if running under ACT (a local GitHub Actions runner) to avoid port conflicts.
+
+    # ---------- Start API container ----------
+    - name: Start API container
+      run: |
+        docker run -d --rm \
+          --network "$postgres_network" \
+          --name api \
+          -e DATABASE_URL=postgresql+asyncpg://fruituser:fruitpass@db:5432/fruitdb \
+          -p 8000:8000 \
+          fruitapi:latest
+        sleep 1 #TODO: wait for API to start
+      # Starts the API container connected to the same network as the Postgres service.
+      # Exposes port 8000 for API access. The sleep is a placeholder; ideally, use a healthcheck or wait-for-it script.
+
+    # ---------- Run integration/E2E ----------
+    - name: Run integration tests
+      run: |
+        docker run --rm \
+          --network "$postgres_network" \
+          fruitapi:test pytest -v -s tests/test_api.py
+      # Runs integration (end-to-end) tests against the running API and database.
+
+    # ---------- Stop API container after integration tests ----------
+    - name: Stop API container after tests
+      if: always()
+      run: |
+        docker stop api || true
+        docker rm api || true
+        docker ps -a
+      # Ensures the API container is stopped and removed after tests, preventing network removal errors.
+
+    # ---------- Setup variables for image tagging ----------
+    - name: Setup variables for image tagging
+      run: |
+        # Determine the correct commit SHA
+        if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+          COMMIT_SHA="${{ github.event.pull_request.head.sha }}"
+        else
+          COMMIT_SHA="${GITHUB_SHA}"
+        fi
+
+        # Extract short SHA and lowercase repository name
+        echo "SHORT_SHA=${COMMIT_SHA:0:7}" >> $GITHUB_ENV
+        echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+      shell: bash
+      # Prepares variables for tagging the Docker image with the commit SHA and repository name.
+
+    # ---------- Login to GitHub Container Registry ----------
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    # ---------- Build and Push production image ----------
+    - name: Build and push prod image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: Dockerfile
+        target: prod
+        push: true
+        tags: |
+            ghcr.io/${{ env.REPO_LC }}:${{ env.SHORT_SHA }}
+            ghcr.io/${{ env.REPO_LC }}:latest
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+      # Builds and pushes the production image to GitHub Container Registry with both short SHA and 'latest' tags.
+      # Uses GitHub Actions cache for faster builds.
