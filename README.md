@@ -28,8 +28,8 @@ $ docker compose up --build
 $ docker compose --profile test up --build --abort-on-container-exit test
 ```
 
-\* The API will be reachable at **[http://localhost:8000](http://localhost:8000)**.
-\* Interactive documentation lives at **[http://localhost:8000/docs](http://localhost:8000/docs)** (Swagger UI).
+* The API will be reachable at **[http://localhost:8000](http://localhost:8000)**.
+* Interactive documentation lives at **[http://localhost:8000/docs](http://localhost:8000/docs)** (Swagger UI).
 
 ---
 
