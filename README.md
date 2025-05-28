@@ -10,7 +10,7 @@ It was built for the technical exercise *"Develop a simple Fruits API"*.
 
 ```bash
 # 1 — Clone the repo
-$ git clone <your‑fork‑url> && cd Fruits-API
+$ git clone <url> && cd Fruits-API
 
 # 2 — Create environment file with DB credentials (or accept defaults)
 $ cp .env.example .env
